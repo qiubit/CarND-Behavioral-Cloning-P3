@@ -12,15 +12,21 @@ from PIL import Image
 from flask import Flask
 from io import BytesIO
 
-from keras.models import load_model
-import h5py
-from keras import __version__ as keras_version
+import torch
+from torchvision import models
 
 sio = socketio.Server()
 app = Flask(__name__)
 model = None
 prev_image_array = None
 
+def load_model(model_path):
+    resnet = models.resnet18(pretrained=False)
+    resnet.fc = torch.nn.Linear(in_features=512, out_features=1, bias=True)
+    state_dict = torch.load(model_path, map_location=torch.device('cpu'))
+    resnet.load_state_dict(state_dict['model'])
+    resnet.eval()
+    return resnet
 
 class SimplePIController:
     def __init__(self, Kp, Ki):
@@ -44,7 +50,7 @@ class SimplePIController:
 
 
 controller = SimplePIController(0.1, 0.002)
-set_speed = 9
+set_speed = 20
 controller.set_desired(set_speed)
 
 
@@ -60,8 +66,17 @@ def telemetry(sid, data):
         # The current image from the center camera of the car
         imgString = data["image"]
         image = Image.open(BytesIO(base64.b64decode(imgString)))
+
+        w, h = image.size
+        image = image.crop((0, 50, w, h-20))
+        image = image.resize((224, 224))
+
         image_array = np.asarray(image)
-        steering_angle = float(model.predict(image_array[None, :, :, :], batch_size=1))
+        image_array = image_array[:, :, ::-1].copy()
+        image_array = image_array / 255.0 - 0.5
+        image_array = image_array.transpose(2, 0, 1)
+
+        steering_angle = float(model(torch.Tensor(image_array[None, :, :, :])))
 
         throttle = controller.update(float(speed))
 
@@ -109,15 +124,6 @@ if __name__ == '__main__':
         help='Path to image folder. This is where the images from the run will be saved.'
     )
     args = parser.parse_args()
-
-    # check that model Keras version is same as local Keras version
-    f = h5py.File(args.model, mode='r')
-    model_version = f.attrs.get('keras_version')
-    keras_version = str(keras_version).encode('utf8')
-
-    if model_version != keras_version:
-        print('You are using Keras version ', keras_version,
-              ', but the model was built using ', model_version)
 
     model = load_model(args.model)
 
